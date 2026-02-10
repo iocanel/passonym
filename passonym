@@ -61,32 +61,40 @@ get_mappings() {
 link_create() {
     local dry_run="${1:-false}"
     ensure_config_exists
+    local linked=0
 
     while IFS=$'\t' read -r real_path alias; do
-        local source="$PASSWORD_STORE_DIR/$real_path.gpg"
-        local target="$PASSWORD_STORE_DIR/$alias.gpg"
+        while IFS= read -r -d '' source; do
+            local rel_source="${source#$PASSWORD_STORE_DIR/}"
+            local rel_target="${rel_source/$real_path/$alias}"
+            local target="$PASSWORD_STORE_DIR/$rel_target"
 
-        if [[ ! -f "$source" ]]; then
-            echo "Warning: Source does not exist: $source" >&2
-            continue
-        fi
+            if [[ "$rel_source" == "$rel_target" ]]; then
+                continue
+            fi
 
-        if [[ -e "$target" && ! -L "$target" ]]; then
-            echo "Warning: Target exists and is not a symlink: $target" >&2
-            continue
-        fi
+            if [[ -e "$target" && ! -L "$target" ]]; then
+                echo "Warning: Target exists and is not a symlink: $target" >&2
+                continue
+            fi
 
-        local relative_source
-        relative_source=$(realpath --relative-to="$(dirname "$target")" "$source")
+            local relative_source
+            relative_source=$(realpath --relative-to="$(dirname "$target")" "$source")
 
-        if [[ "$dry_run" == "true" ]]; then
-            echo "[dry-run] Would create: $alias.gpg -> $relative_source"
-        else
-            mkdir -p "$(dirname "$target")"
-            ln -sf "$relative_source" "$target"
-            echo "Created: $alias.gpg -> $relative_source"
-        fi
+            if [[ "$dry_run" == "true" ]]; then
+                echo "[dry-run] $rel_target -> $relative_source"
+            else
+                mkdir -p "$(dirname "$target")"
+                ln -sf "$relative_source" "$target"
+                echo "Created: $rel_target -> $relative_source"
+            fi
+            linked=$((linked + 1))
+        done < <(find "$PASSWORD_STORE_DIR" -name "*.gpg" -print0 | grep -zZ "/$real_path/")
     done < <(get_mappings)
+
+    if [[ $linked -eq 0 ]]; then
+        echo "No matching password store entries found"
+    fi
 }
 
 # Scrub functions
@@ -290,11 +298,11 @@ test_map_list() {
 }
 
 test_link_create() {
-    mkdir -p "$PASSWORD_STORE_DIR/Email"
-    echo "encrypted" > "$PASSWORD_STORE_DIR/Email/test@example.com.gpg"
-    map_add "Email/test@example.com" "test-alias" > /dev/null
+    mkdir -p "$PASSWORD_STORE_DIR/github.com/test@example.com"
+    echo "encrypted" > "$PASSWORD_STORE_DIR/github.com/test@example.com/password.gpg"
+    map_add "test@example.com" "test-alias" > /dev/null
     link_create "false" > /dev/null
-    if [[ -L "$PASSWORD_STORE_DIR/test-alias.gpg" ]]; then
+    if [[ -L "$PASSWORD_STORE_DIR/github.com/test-alias/password.gpg" ]]; then
         echo "PASS: test_link_create"
     else
         echo "FAIL: test_link_create - symlink not created"
@@ -303,11 +311,11 @@ test_link_create() {
 }
 
 test_link_dry_run() {
-    mkdir -p "$PASSWORD_STORE_DIR/Services"
-    echo "encrypted" > "$PASSWORD_STORE_DIR/Services/github.gpg"
-    map_add "Services/github" "gh" > /dev/null
+    mkdir -p "$PASSWORD_STORE_DIR/gitlab.com/user@test.com"
+    echo "encrypted" > "$PASSWORD_STORE_DIR/gitlab.com/user@test.com/token.gpg"
+    map_add "user@test.com" "my-user" > /dev/null
     link_create "true" > /dev/null
-    if [[ ! -e "$PASSWORD_STORE_DIR/gh.gpg" ]]; then
+    if [[ ! -e "$PASSWORD_STORE_DIR/gitlab.com/my-user/token.gpg" ]]; then
         echo "PASS: test_link_dry_run"
     else
         echo "FAIL: test_link_dry_run - symlink should not exist in dry-run"
