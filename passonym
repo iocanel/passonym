@@ -91,6 +91,24 @@ link_create() {
 
 # Scrub functions
 
+replace_on_directory_boundary() {
+    local text="$1"
+    local pattern="$2"
+    local replacement="$3"
+    local escaped_pattern
+    escaped_pattern=$(printf '%s' "$pattern" | sed 's/[.[\*^$()+?{|\/]/\\&/g')
+    printf '%s\n' "$text" | sed -E \
+        -e "s|(pass )${escaped_pattern}([)\"' ])|\1${replacement}\2|g" \
+        -e "s|(pass )${escaped_pattern}\$|\1${replacement}|g" \
+        -e "s|(pass [\"'])${escaped_pattern}([\"'])|\1${replacement}\2|g" \
+        -e "s|(pass [\"'][^\"']*/)(${escaped_pattern})(/[^\"']*[\"'])|\1${replacement}\3|g" \
+        -e "s|(pass [\"'][^\"']*/)(${escaped_pattern})([\"'])|\1${replacement}\3|g" \
+        -e "s|(pass [\"'])(${escaped_pattern})(/[^\"']*[\"'])|\1${replacement}\3|g" \
+        -e "s|(pass [^\"' ]+/)(${escaped_pattern})(/[^)\"' ]+)|\1${replacement}\3|g" \
+        -e "s|(pass [^\"' ]+/)(${escaped_pattern})([)\"' ])|\1${replacement}\3|g" \
+        -e "s|(pass )(${escaped_pattern})(/[^)\"' ]+)|\1${replacement}\3|g"
+}
+
 scrub_file() {
     local file="$1"
     local dry_run="${2:-false}"
@@ -99,11 +117,7 @@ scrub_file() {
     local modified="$content"
 
     while IFS=$'\t' read -r real_path alias; do
-        local escaped_path
-        escaped_path=$(printf '%s' "$real_path" | sed 's/[.[\*^$()+?{|]/\\&/g')
-        modified=$(echo "$modified" | sed "s|pass $escaped_path|pass $alias|g")
-        modified=$(echo "$modified" | sed "s|pass \"$escaped_path\"|pass \"$alias\"|g")
-        modified=$(echo "$modified" | sed "s|pass '$escaped_path'|pass '$alias'|g")
+        modified=$(replace_on_directory_boundary "$modified" "$real_path" "$alias")
     done < <(get_mappings)
 
     if [[ "$content" == "$modified" ]]; then
@@ -355,6 +369,81 @@ EOF
     fi
 }
 
+test_scrub_directory_boundary_middle() {
+    map_add "john.doe@mail.com" "personal" > /dev/null
+    local test_file="$TEST_DIR/boundary_middle"
+    echo 'password = $(pass Email/john.doe@mail.com/password)' > "$test_file"
+    scrub_file "$test_file" "false"
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == 'password = $(pass Email/personal/password)' ]]; then
+        echo "PASS: test_scrub_directory_boundary_middle"
+    else
+        echo "FAIL: test_scrub_directory_boundary_middle - got '$result'"
+        return 1
+    fi
+}
+
+test_scrub_directory_boundary_start() {
+    map_add "john.doe@mail.com" "personal" > /dev/null
+    local test_file="$TEST_DIR/boundary_start"
+    echo 'password = $(pass john.doe@mail.com/password)' > "$test_file"
+    scrub_file "$test_file" "false"
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == 'password = $(pass personal/password)' ]]; then
+        echo "PASS: test_scrub_directory_boundary_start"
+    else
+        echo "FAIL: test_scrub_directory_boundary_start - got '$result'"
+        return 1
+    fi
+}
+
+test_scrub_directory_boundary_end() {
+    map_add "john.doe@mail.com" "personal" > /dev/null
+    local test_file="$TEST_DIR/boundary_end"
+    echo 'password = $(pass Email/john.doe@mail.com)' > "$test_file"
+    scrub_file "$test_file" "false"
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == 'password = $(pass Email/personal)' ]]; then
+        echo "PASS: test_scrub_directory_boundary_end"
+    else
+        echo "FAIL: test_scrub_directory_boundary_end - got '$result'"
+        return 1
+    fi
+}
+
+test_scrub_no_partial_directory_match() {
+    map_add "john.doe" "personal" > /dev/null
+    local test_file="$TEST_DIR/no_partial"
+    echo 'password = $(pass Email/john.doe@mail.com)' > "$test_file"
+    scrub_file "$test_file" "false"
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == 'password = $(pass Email/john.doe@mail.com)' ]]; then
+        echo "PASS: test_scrub_no_partial_directory_match"
+    else
+        echo "FAIL: test_scrub_no_partial_directory_match - got '$result'"
+        return 1
+    fi
+}
+
+test_scrub_multi_directory_mapping() {
+    map_add "Email/john.doe@mail.com" "personal-email" > /dev/null
+    local test_file="$TEST_DIR/multi_dir"
+    echo 'password = $(pass Email/john.doe@mail.com/password)' > "$test_file"
+    scrub_file "$test_file" "false"
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == 'password = $(pass personal-email/password)' ]]; then
+        echo "PASS: test_scrub_multi_directory_mapping"
+    else
+        echo "FAIL: test_scrub_multi_directory_mapping - got '$result'"
+        return 1
+    fi
+}
+
 run_tests() {
     local failed=0
     local tests=(
@@ -366,6 +455,11 @@ run_tests() {
         test_scrub_file
         test_scrub_dry_run
         test_scrub_quoted_paths
+        test_scrub_directory_boundary_middle
+        test_scrub_directory_boundary_start
+        test_scrub_directory_boundary_end
+        test_scrub_no_partial_directory_match
+        test_scrub_multi_directory_mapping
     )
 
     for test in "${tests[@]}"; do
