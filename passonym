@@ -184,6 +184,7 @@ cmd_link() {
     local dry_run="false"
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --help|-h) show_help; return 0 ;;
             --dry-run) dry_run="true"; shift ;;
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
@@ -197,6 +198,7 @@ cmd_scrub() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --help|-h) show_help; return 0 ;;
             --dry-run) dry_run="true"; shift ;;
             *)
                 if [[ -z "$path" ]]; then
