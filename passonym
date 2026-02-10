@@ -79,7 +79,7 @@ link_create() {
             fi
 
             local relative_source
-            relative_source=$(realpath --relative-to="$(dirname "$target")" "$source")
+            relative_source=$(realpath -m --relative-to="$(dirname "$target")" "$source")
 
             if [[ "$dry_run" == "true" ]]; then
                 echo "[dry-run] $rel_target -> $relative_source"
