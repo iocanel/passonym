@@ -1,0 +1,410 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/passonym"
+MAPPINGS_FILE="$CONFIG_DIR/mappings.json"
+PASSWORD_STORE_DIR="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
+
+# Initialization
+
+ensure_config_exists() {
+    mkdir -p "$CONFIG_DIR"
+    if [[ ! -f "$MAPPINGS_FILE" ]]; then
+        echo '{}' > "$MAPPINGS_FILE"
+    fi
+}
+
+# Mapping functions
+
+map_add() {
+    local real_path="$1"
+    local alias="$2"
+    ensure_config_exists
+    local updated
+    updated=$(jq --arg path "$real_path" --arg alias "$alias" '.[$path] = $alias' "$MAPPINGS_FILE")
+    echo "$updated" > "$MAPPINGS_FILE"
+    echo "Added mapping: $real_path -> $alias"
+}
+
+map_remove() {
+    local alias="$1"
+    ensure_config_exists
+    local real_path
+    real_path=$(jq -r --arg alias "$alias" 'to_entries[] | select(.value == $alias) | .key' "$MAPPINGS_FILE")
+    if [[ -z "$real_path" ]]; then
+        echo "No mapping found for alias: $alias" >&2
+        return 1
+    fi
+    local updated
+    updated=$(jq --arg path "$real_path" 'del(.[$path])' "$MAPPINGS_FILE")
+    echo "$updated" > "$MAPPINGS_FILE"
+    echo "Removed mapping: $real_path -> $alias"
+}
+
+map_list() {
+    ensure_config_exists
+    if [[ $(jq 'length' "$MAPPINGS_FILE") -eq 0 ]]; then
+        echo "No mappings defined"
+        return 0
+    fi
+    jq -r 'to_entries[] | "\(.key) -> \(.value)"' "$MAPPINGS_FILE"
+}
+
+get_mappings() {
+    ensure_config_exists
+    jq -r 'to_entries[] | "\(.key)\t\(.value)"' "$MAPPINGS_FILE"
+}
+
+# Link functions
+
+link_create() {
+    local dry_run="${1:-false}"
+    ensure_config_exists
+
+    while IFS=$'\t' read -r real_path alias; do
+        local source="$PASSWORD_STORE_DIR/$real_path.gpg"
+        local target="$PASSWORD_STORE_DIR/$alias.gpg"
+
+        if [[ ! -f "$source" ]]; then
+            echo "Warning: Source does not exist: $source" >&2
+            continue
+        fi
+
+        if [[ -e "$target" && ! -L "$target" ]]; then
+            echo "Warning: Target exists and is not a symlink: $target" >&2
+            continue
+        fi
+
+        local relative_source
+        relative_source=$(realpath --relative-to="$(dirname "$target")" "$source")
+
+        if [[ "$dry_run" == "true" ]]; then
+            echo "[dry-run] Would create: $alias.gpg -> $relative_source"
+        else
+            mkdir -p "$(dirname "$target")"
+            ln -sf "$relative_source" "$target"
+            echo "Created: $alias.gpg -> $relative_source"
+        fi
+    done < <(get_mappings)
+}
+
+# Scrub functions
+
+scrub_file() {
+    local file="$1"
+    local dry_run="${2:-false}"
+    local content
+    content=$(cat "$file")
+    local modified="$content"
+
+    while IFS=$'\t' read -r real_path alias; do
+        local escaped_path
+        escaped_path=$(printf '%s' "$real_path" | sed 's/[.[\*^$()+?{|]/\\&/g')
+        modified=$(echo "$modified" | sed "s|pass $escaped_path|pass $alias|g")
+        modified=$(echo "$modified" | sed "s|pass \"$escaped_path\"|pass \"$alias\"|g")
+        modified=$(echo "$modified" | sed "s|pass '$escaped_path'|pass '$alias'|g")
+    done < <(get_mappings)
+
+    if [[ "$content" == "$modified" ]]; then
+        return 0
+    fi
+
+    if [[ "$dry_run" == "true" ]]; then
+        echo "=== $file ==="
+        diff --color=auto <(echo "$content") <(echo "$modified") || true
+    else
+        echo "$modified" > "$file"
+        echo "Updated: $file"
+    fi
+}
+
+scrub_path() {
+    local path="$1"
+    local dry_run="${2:-false}"
+
+    if [[ -f "$path" ]]; then
+        scrub_file "$path" "$dry_run"
+    elif [[ -d "$path" ]]; then
+        while IFS= read -r -d '' file; do
+            scrub_file "$file" "$dry_run"
+        done < <(find "$path" -type f -print0)
+    else
+        echo "Path not found: $path" >&2
+        return 1
+    fi
+}
+
+# Command handlers
+
+cmd_map() {
+    local subcmd="${1:-}"
+    shift || true
+
+    case "$subcmd" in
+        add)
+            if [[ $# -lt 2 ]]; then
+                echo "Usage: passonym map add <real-path> <alias>" >&2
+                return 1
+            fi
+            map_add "$1" "$2"
+            ;;
+        remove)
+            if [[ $# -lt 1 ]]; then
+                echo "Usage: passonym map remove <alias>" >&2
+                return 1
+            fi
+            map_remove "$1"
+            ;;
+        list)
+            map_list
+            ;;
+        *)
+            echo "Usage: passonym map <add|remove|list>" >&2
+            return 1
+            ;;
+    esac
+}
+
+cmd_link() {
+    local dry_run="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run="true"; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+    link_create "$dry_run"
+}
+
+cmd_scrub() {
+    local dry_run="false"
+    local path=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run="true"; shift ;;
+            *)
+                if [[ -z "$path" ]]; then
+                    path="$1"
+                else
+                    echo "Unexpected argument: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$path" ]]; then
+        echo "Usage: passonym scrub <file|dir> [--dry-run]" >&2
+        return 1
+    fi
+
+    scrub_path "$path" "$dry_run"
+}
+
+show_help() {
+    cat <<EOF
+passonym - Anonymize password store references
+
+Usage:
+    passonym map add <real-path> <alias>   Add a mapping
+    passonym map remove <alias>            Remove a mapping
+    passonym map list                      List all mappings
+    passonym link [--dry-run]              Create symlinks in password store
+    passonym scrub <file|dir> [--dry-run]  Anonymize pass references in files
+
+Examples:
+    passonym map add "Email/john@work.com" "work-email"
+    passonym link --dry-run
+    passonym scrub ~/.config/mbsyncrc --dry-run
+EOF
+}
+
+# Test functions
+
+test_setup() {
+    export CONFIG_DIR=$(mktemp -d)
+    export MAPPINGS_FILE="$CONFIG_DIR/mappings.json"
+    export PASSWORD_STORE_DIR=$(mktemp -d)
+    export TEST_DIR=$(mktemp -d)
+}
+
+test_teardown() {
+    rm -rf "$CONFIG_DIR" "$PASSWORD_STORE_DIR" "$TEST_DIR"
+}
+
+test_map_add() {
+    map_add "Email/test@example.com" "test-email" > /dev/null
+    local result
+    result=$(jq -r '.["Email/test@example.com"]' "$MAPPINGS_FILE")
+    if [[ "$result" == "test-email" ]]; then
+        echo "PASS: test_map_add"
+    else
+        echo "FAIL: test_map_add - expected 'test-email', got '$result'"
+        return 1
+    fi
+}
+
+test_map_remove() {
+    map_add "Email/remove@example.com" "remove-me" > /dev/null
+    map_remove "remove-me" > /dev/null
+    local count
+    count=$(jq 'length' "$MAPPINGS_FILE")
+    if [[ "$count" -eq 0 ]]; then
+        echo "PASS: test_map_remove"
+    else
+        echo "FAIL: test_map_remove - mapping still exists"
+        return 1
+    fi
+}
+
+test_map_list() {
+    map_add "Path/one" "alias-one" > /dev/null
+    map_add "Path/two" "alias-two" > /dev/null
+    local count
+    count=$(map_list | wc -l)
+    if [[ "$count" -eq 2 ]]; then
+        echo "PASS: test_map_list"
+    else
+        echo "FAIL: test_map_list - expected 2 lines, got $count"
+        return 1
+    fi
+}
+
+test_link_create() {
+    mkdir -p "$PASSWORD_STORE_DIR/Email"
+    echo "encrypted" > "$PASSWORD_STORE_DIR/Email/test@example.com.gpg"
+    map_add "Email/test@example.com" "test-alias" > /dev/null
+    link_create "false" > /dev/null
+    if [[ -L "$PASSWORD_STORE_DIR/test-alias.gpg" ]]; then
+        echo "PASS: test_link_create"
+    else
+        echo "FAIL: test_link_create - symlink not created"
+        return 1
+    fi
+}
+
+test_link_dry_run() {
+    mkdir -p "$PASSWORD_STORE_DIR/Services"
+    echo "encrypted" > "$PASSWORD_STORE_DIR/Services/github.gpg"
+    map_add "Services/github" "gh" > /dev/null
+    link_create "true" > /dev/null
+    if [[ ! -e "$PASSWORD_STORE_DIR/gh.gpg" ]]; then
+        echo "PASS: test_link_dry_run"
+    else
+        echo "FAIL: test_link_dry_run - symlink should not exist in dry-run"
+        return 1
+    fi
+}
+
+test_scrub_file() {
+    map_add "Email/secret@company.com" "work" > /dev/null
+    local test_file="$TEST_DIR/config"
+    echo 'password = $(pass Email/secret@company.com)' > "$test_file"
+    scrub_file "$test_file" "false"
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == 'password = $(pass work)' ]]; then
+        echo "PASS: test_scrub_file"
+    else
+        echo "FAIL: test_scrub_file - got '$result'"
+        return 1
+    fi
+}
+
+test_scrub_dry_run() {
+    map_add "Email/dry@test.com" "dry-alias" > /dev/null
+    local test_file="$TEST_DIR/dryconfig"
+    echo 'pass Email/dry@test.com' > "$test_file"
+    scrub_file "$test_file" "true" > /dev/null
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == 'pass Email/dry@test.com' ]]; then
+        echo "PASS: test_scrub_dry_run"
+    else
+        echo "FAIL: test_scrub_dry_run - file was modified in dry-run"
+        return 1
+    fi
+}
+
+test_scrub_quoted_paths() {
+    map_add "Path/with spaces" "no-spaces" > /dev/null
+    local test_file="$TEST_DIR/quoted"
+    cat > "$test_file" <<'EOF'
+double = $(pass "Path/with spaces")
+single = $(pass 'Path/with spaces')
+EOF
+    scrub_file "$test_file" "false"
+    local expected
+    expected=$(cat <<'EOF'
+double = $(pass "no-spaces")
+single = $(pass 'no-spaces')
+EOF
+)
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == "$expected" ]]; then
+        echo "PASS: test_scrub_quoted_paths"
+    else
+        echo "FAIL: test_scrub_quoted_paths"
+        echo "Expected: $expected"
+        echo "Got: $result"
+        return 1
+    fi
+}
+
+run_tests() {
+    local failed=0
+    local tests=(
+        test_map_add
+        test_map_remove
+        test_map_list
+        test_link_create
+        test_link_dry_run
+        test_scrub_file
+        test_scrub_dry_run
+        test_scrub_quoted_paths
+    )
+
+    for test in "${tests[@]}"; do
+        test_setup
+        if ! $test; then
+            ((failed++))
+        fi
+        test_teardown
+    done
+
+    echo ""
+    if [[ $failed -eq 0 ]]; then
+        echo "All ${#tests[@]} tests passed"
+    else
+        echo "$failed of ${#tests[@]} tests failed"
+        return 1
+    fi
+}
+
+# Main entry point
+
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        map)    cmd_map "$@" ;;
+        link)   cmd_link "$@" ;;
+        scrub)  cmd_scrub "$@" ;;
+        --test) run_tests ;;
+        --help|-h|"") show_help ;;
+        *)
+            echo "Unknown command: $cmd" >&2
+            show_help
+            return 1
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
