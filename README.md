@@ -8,7 +8,7 @@ Password store paths often reveal sensitive information:
 
 ```bash
 # Your email is exposed in public dotfiles
-password = $(pass Email/john.doe@acme-corp.com)
+password = $(pass github.com/john.doe@gmail.com/token)
 ```
 
 ## Solution
@@ -17,7 +17,7 @@ Create aliases for sensitive paths and use them instead:
 
 ```bash
 # Anonymized - no personal info exposed
-password = $(pass work-email)
+password = $(pass github/token)
 ```
 
 ## Installation
@@ -33,17 +33,40 @@ Requires `jq` for JSON handling.
 
 ### Managing Mappings
 
+Mappings can be **full paths** or **partial paths**:
+
 ```bash
-# Add a mapping
-passonym map add "Email/john.doe@acme.com" "work-email"
-passonym map add "Services/github/johndoe" "github"
+# Full path mapping
+passonym map add "github.com/john.doe@gmail.com/token" "github/token"
+
+# Partial mapping (just the sensitive directory)
+passonym map add "john.doe@gmail.com" "my-email"
 
 # List mappings
 passonym map list
 
 # Remove a mapping
-passonym map remove "work-email"
+passonym map remove "github/token"
 ```
+
+### Directory Boundary Matching
+
+Partial mappings match on **directory boundaries only**. A directory is either matched whole or not at all.
+
+With mapping `john.doe@gmail.com` → `my-email`:
+
+| Path | Result |
+|------|--------|
+| `gmail.com/john.doe@gmail.com/password` | `gmail.com/my-email/password` ✓ |
+| `github.com/john.doe@gmail.com/token` | `github.com/my-email/token` ✓ |
+| `john.doe@gmail.com/password` | `my-email/password` ✓ |
+
+With mapping `john.doe` → `my-username`:
+
+| Path | Result |
+|------|--------|
+| `gmail.com/john.doe@gmail.com/password` | unchanged ✗ (partial directory) |
+| `github.com/john.doe/token` | `github.com/my-username/token` ✓ |
 
 ### Creating Symlinks
 
@@ -69,7 +92,7 @@ passonym scrub ~/.config/mbsyncrc --dry-run
 passonym scrub ~/.config/mbsyncrc
 
 # Process entire directory
-passonym scrub ~/.config/email/ --dry-run
+passonym scrub ~/.dotfiles/ --dry-run
 ```
 
 ## Configuration
@@ -78,8 +101,8 @@ Mappings are stored in `~/.config/passonym/mappings.json`:
 
 ```json
 {
-  "Email/john.doe@acme.com": "work-email",
-  "Services/github/johndoe": "github"
+  "github.com/john.doe@gmail.com/token": "github/token",
+  "john.doe@gmail.com": "my-email"
 }
 ```
 
@@ -87,9 +110,9 @@ Mappings are stored in `~/.config/passonym/mappings.json`:
 
 The `scrub` command handles these pass invocation styles:
 
-- `pass Path/to/secret`
-- `pass "Path/to/secret"`
-- `pass 'Path/to/secret'`
+- `pass path/to/secret`
+- `pass "path/to/secret"`
+- `pass 'path/to/secret'`
 
 ## Testing
 
