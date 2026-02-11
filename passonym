@@ -108,32 +108,67 @@ link_create() {
 
 link_remove() {
     local dry_run="${1:-false}"
-    ensure_state_exists
+    ensure_config_exists
     local removed=0
 
+    while IFS=$'\t' read -r real_path alias; do
+        while IFS= read -r -d '' link; do
+            if [[ -L "$link" ]]; then
+                if [[ "$dry_run" == "true" ]]; then
+                    echo "[dry-run] Would remove: ${link#$PASSWORD_STORE_DIR/}"
+                else
+                    rm "$link"
+                    echo "Removed: ${link#$PASSWORD_STORE_DIR/}"
+                fi
+                removed=$((removed + 1))
+            fi
+        done < <(find "$PASSWORD_STORE_DIR" -type l -name "*.gpg" -print0 2>/dev/null | grep -zZ "/$alias/")
+    done < <(get_mappings)
+
+    if [[ $removed -eq 0 ]]; then
+        echo "No matching symlinks found"
+    fi
+}
+
+link_undo() {
+    local dry_run="${1:-false}"
+    local count="${2:-0}"
+    ensure_state_exists
+    local removed=0
+    local total_lines
+
     if [[ ! -s "$LINKS_FILE" ]]; then
-        echo "No links to remove"
+        echo "No links to undo"
         return 0
     fi
+
+    total_lines=$(wc -l < "$LINKS_FILE")
+    if [[ "$count" -eq 0 || "$count" -gt "$total_lines" ]]; then
+        count="$total_lines"
+    fi
+
+    local links_to_remove
+    links_to_remove=$(tail -n "$count" "$LINKS_FILE")
 
     while IFS= read -r link; do
         if [[ -L "$link" ]]; then
             if [[ "$dry_run" == "true" ]]; then
-                echo "[dry-run] Would remove: $link"
+                echo "[dry-run] Would undo: ${link#$PASSWORD_STORE_DIR/}"
             else
                 rm "$link"
-                echo "Removed: $link"
+                echo "Undone: ${link#$PASSWORD_STORE_DIR/}"
             fi
             removed=$((removed + 1))
         fi
-    done < "$LINKS_FILE"
+    done <<< "$links_to_remove"
 
     if [[ "$dry_run" != "true" ]]; then
-        > "$LINKS_FILE"
+        head -n "-$count" "$LINKS_FILE" > "$LINKS_FILE.tmp"
+        mv "$LINKS_FILE.tmp" "$LINKS_FILE"
     fi
 
     if [[ $removed -eq 0 ]]; then
-        echo "No links found to remove"
+        echo "No links found to undo"
     fi
 }
 
@@ -252,6 +287,20 @@ cmd_unlink() {
     link_remove "$dry_run"
 }
 
+cmd_undo() {
+    local dry_run="false"
+    local count=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) show_help; return 0 ;;
+            --dry-run) dry_run="true"; shift ;;
+            [0-9]*) count="$1"; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+    link_undo "$dry_run" "$count"
+}
+
 cmd_scrub() {
     local dry_run="false"
     local path=""
@@ -289,12 +338,15 @@ Usage:
     passonym map remove <alias>            Remove a mapping
     passonym map list                      List all mappings
     passonym link [--dry-run]              Create symlinks in password store
-    passonym unlink [--dry-run]            Remove symlinks created by link
+    passonym unlink [--dry-run]            Remove symlinks matching mappings
+    passonym undo [N] [--dry-run]          Undo last N link operations (default: all)
     passonym scrub <file|dir> [--dry-run]  Anonymize pass references in files
 
 Examples:
-    passonym map add "github.com/john@work.com/token" "github/token"
+    passonym map add "john@work.com" "work-email"
     passonym link --dry-run
+    passonym unlink --dry-run
+    passonym undo 5
     passonym scrub ~/.config/mbsyncrc --dry-run
 EOF
 }
@@ -393,6 +445,23 @@ test_unlink() {
         return 1
     fi
     echo "PASS: test_unlink"
+}
+
+test_undo() {
+    mkdir -p "$PASSWORD_STORE_DIR/site.com/user@undo.com"
+    echo "encrypted" > "$PASSWORD_STORE_DIR/site.com/user@undo.com/password.gpg"
+    map_add "user@undo.com" "undo-alias" > /dev/null
+    link_create "false" > /dev/null
+    if [[ ! -L "$PASSWORD_STORE_DIR/site.com/undo-alias/password.gpg" ]]; then
+        echo "FAIL: test_undo - symlink not created"
+        return 1
+    fi
+    link_undo "false" "0" > /dev/null
+    if [[ -e "$PASSWORD_STORE_DIR/site.com/undo-alias/password.gpg" ]]; then
+        echo "FAIL: test_undo - symlink not undone"
+        return 1
+    fi
+    echo "PASS: test_undo"
 }
 
 test_scrub_file() {
@@ -535,6 +604,7 @@ run_tests() {
         test_link_create
         test_link_dry_run
         test_unlink
+        test_undo
         test_scrub_file
         test_scrub_dry_run
         test_scrub_quoted_paths
@@ -572,6 +642,7 @@ main() {
         map)    cmd_map "$@" ;;
         link)   cmd_link "$@" ;;
         unlink) cmd_unlink "$@" ;;
+        undo)   cmd_undo "$@" ;;
         scrub)  cmd_scrub "$@" ;;
         --test) run_tests ;;
         --help|-h|"") show_help ;;
