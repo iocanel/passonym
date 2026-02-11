@@ -124,6 +124,18 @@ passonym scrub ~/.config/mbsyncrc
 passonym scrub ~/.dotfiles/ --dry-run
 ```
 
+### Restoring Original References
+
+Reverse the scrub operation - replace aliases with real paths:
+
+```bash
+# Preview what would be restored
+passonym unscrub ~/.config/mbsyncrc --dry-run
+
+# Restore original paths
+passonym unscrub ~/.config/mbsyncrc
+```
+
 ## Configuration
 
 Mappings are stored in `~/.config/passonym/mappings.json`:

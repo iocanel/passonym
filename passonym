@@ -232,6 +232,46 @@ scrub_path() {
     fi
 }
 
+unscrub_file() {
+    local file="$1"
+    local dry_run="${2:-false}"
+    local content
+    content=$(cat "$file")
+    local modified="$content"
+
+    while IFS=$'\t' read -r real_path alias; do
+        modified=$(replace_on_directory_boundary "$modified" "$alias" "$real_path")
+    done < <(get_mappings)
+
+    if [[ "$content" == "$modified" ]]; then
+        return 0
+    fi
+
+    if [[ "$dry_run" == "true" ]]; then
+        echo "=== $file ==="
+        diff --color=auto <(echo "$content") <(echo "$modified") || true
+    else
+        echo "$modified" > "$file"
+        echo "Updated: $file"
+    fi
+}
+
+unscrub_path() {
+    local path="$1"
+    local dry_run="${2:-false}"
+
+    if [[ -f "$path" ]]; then
+        unscrub_file "$path" "$dry_run"
+    elif [[ -d "$path" ]]; then
+        while IFS= read -r -d '' file; do
+            unscrub_file "$file" "$dry_run"
+        done < <(find "$path" -type f -print0)
+    else
+        echo "Path not found: $path" >&2
+        return 1
+    fi
+}
+
 # Command handlers
 
 cmd_map() {
@@ -329,6 +369,34 @@ cmd_scrub() {
     scrub_path "$path" "$dry_run"
 }
 
+cmd_unscrub() {
+    local dry_run="false"
+    local path=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) show_help; return 0 ;;
+            --dry-run) dry_run="true"; shift ;;
+            *)
+                if [[ -z "$path" ]]; then
+                    path="$1"
+                else
+                    echo "Unexpected argument: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$path" ]]; then
+        echo "Usage: passonym unscrub <file|dir> [--dry-run]" >&2
+        return 1
+    fi
+
+    unscrub_path "$path" "$dry_run"
+}
+
 show_help() {
     cat <<EOF
 passonym - Anonymize password store references
@@ -341,12 +409,15 @@ Usage:
     passonym unlink [--dry-run]            Remove symlinks matching mappings
     passonym undo [N] [--dry-run]          Undo last N link operations (default: all)
     passonym scrub <file|dir> [--dry-run]  Anonymize pass references in files
+    passonym unscrub <file|dir> [--dry-run] Restore original pass references
 
 Examples:
     passonym map add "john@work.com" "work-email"
     passonym link --dry-run
     passonym unlink --dry-run
     passonym undo 5
+    passonym scrub ~/.config/mbsyncrc
+    passonym unscrub ~/.config/mbsyncrc
     passonym scrub ~/.config/mbsyncrc --dry-run
 EOF
 }
@@ -509,6 +580,21 @@ test_scrub_pass_show() {
     fi
 }
 
+test_unscrub() {
+    map_add "user@unscrub.com" "unscrub-alias" > /dev/null
+    local test_file="$TEST_DIR/unscrub"
+    echo 'password = $(pass github.com/unscrub-alias/password)' > "$test_file"
+    unscrub_file "$test_file" "false"
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == 'password = $(pass github.com/user@unscrub.com/password)' ]]; then
+        echo "PASS: test_unscrub"
+    else
+        echo "FAIL: test_unscrub - got '$result'"
+        return 1
+    fi
+}
+
 test_scrub_quoted_paths() {
     map_add "Path/with spaces" "no-spaces" > /dev/null
     local test_file="$TEST_DIR/quoted"
@@ -623,6 +709,7 @@ run_tests() {
         test_scrub_file
         test_scrub_dry_run
         test_scrub_pass_show
+        test_unscrub
         test_scrub_quoted_paths
         test_scrub_directory_boundary_middle
         test_scrub_directory_boundary_start
@@ -655,12 +742,13 @@ main() {
     shift || true
 
     case "$cmd" in
-        map)    cmd_map "$@" ;;
-        link)   cmd_link "$@" ;;
-        unlink) cmd_unlink "$@" ;;
-        undo)   cmd_undo "$@" ;;
-        scrub)  cmd_scrub "$@" ;;
-        --test) run_tests ;;
+        map)     cmd_map "$@" ;;
+        link)    cmd_link "$@" ;;
+        unlink)  cmd_unlink "$@" ;;
+        undo)    cmd_undo "$@" ;;
+        scrub)   cmd_scrub "$@" ;;
+        unscrub) cmd_unscrub "$@" ;;
+        --test)  run_tests ;;
         --help|-h|"") show_help ;;
         *)
             echo "Unknown command: $cmd" >&2
