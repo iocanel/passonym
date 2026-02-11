@@ -4,6 +4,8 @@ set -euo pipefail
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/passonym"
 MAPPINGS_FILE="$CONFIG_DIR/mappings.json"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/passonym"
+LINKS_FILE="$STATE_DIR/links"
 PASSWORD_STORE_DIR="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
 
 # Initialization
@@ -13,6 +15,11 @@ ensure_config_exists() {
     if [[ ! -f "$MAPPINGS_FILE" ]]; then
         echo '{}' > "$MAPPINGS_FILE"
     fi
+}
+
+ensure_state_exists() {
+    mkdir -p "$STATE_DIR"
+    touch "$LINKS_FILE"
 }
 
 # Mapping functions
@@ -61,6 +68,7 @@ get_mappings() {
 link_create() {
     local dry_run="${1:-false}"
     ensure_config_exists
+    ensure_state_exists
     local linked=0
 
     while IFS=$'\t' read -r real_path alias; do
@@ -86,6 +94,7 @@ link_create() {
             else
                 mkdir -p "$(dirname "$target")"
                 ln -sf "$relative_source" "$target"
+                echo "$target" >> "$LINKS_FILE"
                 echo "Created: $rel_target -> $relative_source"
             fi
             linked=$((linked + 1))
@@ -94,6 +103,37 @@ link_create() {
 
     if [[ $linked -eq 0 ]]; then
         echo "No matching password store entries found"
+    fi
+}
+
+link_remove() {
+    local dry_run="${1:-false}"
+    ensure_state_exists
+    local removed=0
+
+    if [[ ! -s "$LINKS_FILE" ]]; then
+        echo "No links to remove"
+        return 0
+    fi
+
+    while IFS= read -r link; do
+        if [[ -L "$link" ]]; then
+            if [[ "$dry_run" == "true" ]]; then
+                echo "[dry-run] Would remove: $link"
+            else
+                rm "$link"
+                echo "Removed: $link"
+            fi
+            removed=$((removed + 1))
+        fi
+    done < "$LINKS_FILE"
+
+    if [[ "$dry_run" != "true" ]]; then
+        > "$LINKS_FILE"
+    fi
+
+    if [[ $removed -eq 0 ]]; then
+        echo "No links found to remove"
     fi
 }
 
@@ -200,6 +240,18 @@ cmd_link() {
     link_create "$dry_run"
 }
 
+cmd_unlink() {
+    local dry_run="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) show_help; return 0 ;;
+            --dry-run) dry_run="true"; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+    link_remove "$dry_run"
+}
+
 cmd_scrub() {
     local dry_run="false"
     local path=""
@@ -237,10 +289,11 @@ Usage:
     passonym map remove <alias>            Remove a mapping
     passonym map list                      List all mappings
     passonym link [--dry-run]              Create symlinks in password store
+    passonym unlink [--dry-run]            Remove symlinks created by link
     passonym scrub <file|dir> [--dry-run]  Anonymize pass references in files
 
 Examples:
-    passonym map add "Email/john@work.com" "work-email"
+    passonym map add "github.com/john@work.com/token" "github/token"
     passonym link --dry-run
     passonym scrub ~/.config/mbsyncrc --dry-run
 EOF
@@ -251,12 +304,14 @@ EOF
 test_setup() {
     export CONFIG_DIR=$(mktemp -d)
     export MAPPINGS_FILE="$CONFIG_DIR/mappings.json"
+    export STATE_DIR=$(mktemp -d)
+    export LINKS_FILE="$STATE_DIR/links"
     export PASSWORD_STORE_DIR=$(mktemp -d)
     export TEST_DIR=$(mktemp -d)
 }
 
 test_teardown() {
-    rm -rf "$CONFIG_DIR" "$PASSWORD_STORE_DIR" "$TEST_DIR"
+    rm -rf "$CONFIG_DIR" "$STATE_DIR" "$PASSWORD_STORE_DIR" "$TEST_DIR"
 }
 
 test_map_add() {
@@ -321,6 +376,23 @@ test_link_dry_run() {
         echo "FAIL: test_link_dry_run - symlink should not exist in dry-run"
         return 1
     fi
+}
+
+test_unlink() {
+    mkdir -p "$PASSWORD_STORE_DIR/example.com/user@test.com"
+    echo "encrypted" > "$PASSWORD_STORE_DIR/example.com/user@test.com/password.gpg"
+    map_add "user@test.com" "my-alias" > /dev/null
+    link_create "false" > /dev/null
+    if [[ ! -L "$PASSWORD_STORE_DIR/example.com/my-alias/password.gpg" ]]; then
+        echo "FAIL: test_unlink - symlink not created"
+        return 1
+    fi
+    link_remove "false" > /dev/null
+    if [[ -e "$PASSWORD_STORE_DIR/example.com/my-alias/password.gpg" ]]; then
+        echo "FAIL: test_unlink - symlink not removed"
+        return 1
+    fi
+    echo "PASS: test_unlink"
 }
 
 test_scrub_file() {
@@ -462,6 +534,7 @@ run_tests() {
         test_map_list
         test_link_create
         test_link_dry_run
+        test_unlink
         test_scrub_file
         test_scrub_dry_run
         test_scrub_quoted_paths
@@ -498,6 +571,7 @@ main() {
     case "$cmd" in
         map)    cmd_map "$@" ;;
         link)   cmd_link "$@" ;;
+        unlink) cmd_unlink "$@" ;;
         scrub)  cmd_scrub "$@" ;;
         --test) run_tests ;;
         --help|-h|"") show_help ;;
