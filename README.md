@@ -140,8 +140,11 @@ Mappings are stored in `~/.config/passonym/mappings.json`:
 The `scrub` command handles these pass invocation styles:
 
 - `pass path/to/secret`
+- `pass show path/to/secret`
 - `pass "path/to/secret"`
+- `pass show "path/to/secret"`
 - `pass 'path/to/secret'`
+- `pass show 'path/to/secret'`
 
 ## Testing
 

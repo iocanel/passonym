@@ -181,15 +181,15 @@ replace_on_directory_boundary() {
     local escaped_pattern
     escaped_pattern=$(printf '%s' "$pattern" | sed 's/[.[\*^$()+?{|\/]/\\&/g')
     printf '%s\n' "$text" | sed -E \
-        -e "s|(pass )${escaped_pattern}([)\"' ])|\1${replacement}\2|g" \
-        -e "s|(pass )${escaped_pattern}\$|\1${replacement}|g" \
-        -e "s|(pass [\"'])${escaped_pattern}([\"'])|\1${replacement}\2|g" \
-        -e "s|(pass [\"'][^\"']*/)(${escaped_pattern})(/[^\"']*[\"'])|\1${replacement}\3|g" \
-        -e "s|(pass [\"'][^\"']*/)(${escaped_pattern})([\"'])|\1${replacement}\3|g" \
-        -e "s|(pass [\"'])(${escaped_pattern})(/[^\"']*[\"'])|\1${replacement}\3|g" \
-        -e "s|(pass [^\"' ]+/)(${escaped_pattern})(/[^)\"' ]+)|\1${replacement}\3|g" \
-        -e "s|(pass [^\"' ]+/)(${escaped_pattern})([)\"' ])|\1${replacement}\3|g" \
-        -e "s|(pass )(${escaped_pattern})(/[^)\"' ]+)|\1${replacement}\3|g"
+        -e "s|(pass (show )?)${escaped_pattern}([)\"' ])|\1${replacement}\3|g" \
+        -e "s|(pass (show )?)${escaped_pattern}\$|\1${replacement}|g" \
+        -e "s|(pass (show )?[\"'])${escaped_pattern}([\"'])|\1${replacement}\3|g" \
+        -e "s|(pass (show )?[\"'][^\"']*/)(${escaped_pattern})(/[^\"']*[\"'])|\1${replacement}\4|g" \
+        -e "s|(pass (show )?[\"'][^\"']*/)(${escaped_pattern})([\"'])|\1${replacement}\4|g" \
+        -e "s|(pass (show )?[\"'])(${escaped_pattern})(/[^\"']*[\"'])|\1${replacement}\4|g" \
+        -e "s|(pass (show )?[^\"' ]+/)(${escaped_pattern})(/[^)\"' ]+)|\1${replacement}\4|g" \
+        -e "s|(pass (show )?[^\"' ]+/)(${escaped_pattern})([)\"' ])|\1${replacement}\4|g" \
+        -e "s|(pass (show )?)(${escaped_pattern})(/[^)\"' ]+)|\1${replacement}\4|g"
 }
 
 scrub_file() {
@@ -494,6 +494,21 @@ test_scrub_dry_run() {
     fi
 }
 
+test_scrub_pass_show() {
+    map_add "user@example.com" "my-user" > /dev/null
+    local test_file="$TEST_DIR/passshow"
+    echo 'token=$(pass show github.com/user@example.com/token)' > "$test_file"
+    scrub_file "$test_file" "false"
+    local result
+    result=$(cat "$test_file")
+    if [[ "$result" == 'token=$(pass show github.com/my-user/token)' ]]; then
+        echo "PASS: test_scrub_pass_show"
+    else
+        echo "FAIL: test_scrub_pass_show - got '$result'"
+        return 1
+    fi
+}
+
 test_scrub_quoted_paths() {
     map_add "Path/with spaces" "no-spaces" > /dev/null
     local test_file="$TEST_DIR/quoted"
@@ -607,6 +622,7 @@ run_tests() {
         test_undo
         test_scrub_file
         test_scrub_dry_run
+        test_scrub_pass_show
         test_scrub_quoted_paths
         test_scrub_directory_boundary_middle
         test_scrub_directory_boundary_start
