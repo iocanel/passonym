@@ -80,6 +80,35 @@ passonym link --dry-run
 passonym link
 ```
 
+### Removing Symlinks
+
+Remove symlinks that match your mappings:
+
+```bash
+# Preview what would be removed
+passonym unlink --dry-run
+
+# Remove all symlinks matching mappings
+passonym unlink
+```
+
+The `unlink` command scans the password store for symlinks containing alias paths and removes them. This is stateless and idempotent.
+
+### Undoing Link Operations
+
+Revert previous link operations using the state file:
+
+```bash
+# Undo all previous link operations
+passonym undo
+
+# Undo only the last 5 links created
+passonym undo 5
+
+# Preview what would be undone
+passonym undo --dry-run
+```
+
 ### Anonymizing Files
 
 Replace real paths with aliases in configuration files:
